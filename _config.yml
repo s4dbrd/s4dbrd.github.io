@@ -23,7 +23,7 @@ title_separator : "|"
 email: s4dbrd@s4dbrd.com
 description: ""
 baseurl: "" # the subpath of your site, e.g. /blog
-url: "https://s4dbrd.com" # the base hostname & protocol for your site, e.g. http://example.com
+url: "https://s4dbrd.github.io" # the base hostname & protocol for your site, e.g. http://example.com
 words_per_minute         : 200
 comments:
   provider               : # false (default), "disqus", "discourse", "facebook", "google-plus", "staticman", "staticman_v2", "utterances", "custom"
