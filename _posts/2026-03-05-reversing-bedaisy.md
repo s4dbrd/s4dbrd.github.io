@@ -43,11 +43,13 @@ The `.text` section is roughly 100KB. The `.be0` section is 7.4MB, accounting fo
 ![BEDaisy section layout in IDA](/assets/img/posts/bedaisy-sections-ida.png)
 _BEDaisy's section layout: a small .text section alongside a 7.4MB .be0 section. All functions in .be0 appear as nullsubs or data in static analysis of the on-disk binary._
 
-The on-disk `.be0` section is not meaningful code. IDA's autoanalysis produces nothing but `nullsub` functions and undefined data. This immediately suggests one of two things: the section is packed/encrypted and decrypted at runtime, or it is obfuscated in a way that defeats static disassembly. As it turns out, the answer is closer to the second.
+The on-disk `.be0` section is not meaningful code. IDA's autoanalysis produces nothing but `nullsub` functions and undefined data. This is consistent with code virtualization: the section most likely contains VM bytecode intended to run inside a custom interpreter embedded in the binary, rather than native x86-64 instructions that a disassembler can parse.
 
-### Not VMProtect, Not Themida
+### The Protector
 
-A reasonable first guess for a 7.4MB obfuscated section would be VMProtect or Themida, the two most common commercial code protectors used in game security software. However, the section name `.be0` does not match the signature of either. VMProtect uses `.vmp0`/`.vmp1` sections, and Themida uses its own distinct markers. There is no `.vmp` section, no Themida signature strings, and the packing structure does not match known commercial protectors. This is BattlEye's own proprietary obfuscation scheme.
+A reasonable first guess for a 7.4MB obfuscated section would be VMProtect or Themida, the two most common commercial code protectors used in game security software. The standard `.vmp0`/`.vmp1` section names are absent, as are Themida's distinct markers. I initially took the custom `.be0` name as evidence against VMProtect, which was a mistake: VMProtect allows section names to be freely configured at build time, and security software routinely renames them to obscure the toolchain. The absence of canonical section names says nothing about which protector was used.
+
+The obfuscation characteristics, including opaque predicates, control flow flattening, and code executing as VM bytecode inside a custom interpreter, are consistent with what is widely understood to be a heavily customized VMProtect build, not a proprietary scheme constructed from scratch. Enterprise clients of commercial protectors routinely commission custom builds stripped of default watermarks and identifiers, which is the most plausible explanation for the absent signatures here.
 
 ---
 
@@ -84,7 +86,7 @@ _fltmc output showing BEDaisy registered as a minifilter at altitude 321000, wit
 
 ### The Debugger Problem
 
-The first thing I wanted to do was attach a kernel debugger, break at driver load, and step through the unpacking process. This did not work.
+The first thing I wanted to do was attach a kernel debugger, break at driver load, and step through the initialization process. This did not work.
 
 I set a breakpoint on `nt!MmLoadSystemImage` and caught BEDaisy's load:
 
@@ -93,7 +95,7 @@ dt nt!_UNICODE_STRING @rcx
  "\??\C:\Program Files (x86)\Common Files\BattlEye\BEDaisy.sys"
 ```
 
-`MmLoadSystemImage` returned successfully (`eax=0`), and I was able to confirm the image was mapped in memory by finding the MZ header at the base address. But the moment I let execution continue, the driver detected the debugger and unloaded. Setting hardware breakpoints on the `.be0` section to catch the unpacker writing decrypted code never fired. The driver checks for the presence of a kernel debugger before doing anything meaningful.
+`MmLoadSystemImage` returned successfully (`eax=0`), and I was able to confirm the image was mapped in memory by finding the MZ header at the base address. But the moment I let execution continue, the driver detected the debugger and unloaded. Setting hardware breakpoints on the `.be0` section to catch any runtime self-modification never fired. The driver checks for the presence of a kernel debugger before doing anything meaningful.
 
 The standard approach would be to patch `nt!KdDebuggerEnabled` and `nt!KdDebuggerNotPresent` to hide the debugger. The problem is that patching these values breaks the debugger connection itself, because the kernel debugging subsystem uses them internally. Patching `KdDebuggerEnabled` to 0 and `KdDebuggerNotPresent` to 1 causes WinDbg to lose its connection to the target.
 
@@ -108,11 +110,13 @@ Following the jump reveals heavily obfuscated code with junk instructions, opaqu
 ![BEDaisy entry point](/assets/img/posts/bedaisy-entrypoint.png)
 _BEDaisy's DriverEntry immediately jumps into the obfuscated .be0 section. The target address contains junk instructions and control flow obfuscation._
 
+One tool I did not try is [drvtrace](https://github.com/eversinc33/drvtrace){:target="_blank"}, a WinDbg extension that traces module transitions from a debugged driver, effectively logging every call the driver makes into other modules. For a driver like BEDaisy that hides its imports through runtime resolution, this could give you a live view of which kernel APIs it actually calls and in what order, without needing to decompile anything. I went with the crash dump approach instead, but drvtrace would be a natural complement to that kind of static analysis.
+
 ---
 
 ## 3. Memory Acquisition via Crash Dump
 
-Since attaching a debugger causes the driver to refuse to unpack, I needed a way to capture BEDaisy's memory while it was running without a debugger present. The solution is straightforward: let the driver load and run normally, then trigger a kernel crash dump that captures all of physical memory.
+Since attaching a debugger causes the driver to detect the environment and refuse to initialize, I needed a way to capture BEDaisy's memory while it was running without a debugger present. The solution is straightforward: let the driver load and run normally, then trigger a kernel crash dump that captures all of physical memory.
 
 ### The Procedure
 
@@ -124,7 +128,7 @@ Since attaching a debugger causes the driver to refuse to unpack, I needed a way
 6. Trigger a BSOD using NotMyFault from Sysinternals (High IRQL fault)
 7. After reboot, open `C:\Windows\MEMORY.DMP` in WinDbg
 
-This works because BEDaisy has no reason to distrust the environment when no debugger is present. It loads, unpacks, registers its callbacks, and runs normally. The crash dump captures the entire kernel address space, including BEDaisy's memory, in whatever state it was in at the moment of the crash.
+This works because BEDaisy has no reason to distrust the environment when no debugger is present. It loads, initializes, registers its callbacks, and runs normally. The crash dump captures the entire kernel address space, including BEDaisy's memory, in whatever state it was in at the moment of the crash.
 
 One thing that tripped me up: the VM was initially configured for Small memory dumps (`DebugInfoType=3`), which only creates minidumps that do not contain driver memory. It must be set to Kernel (`DebugInfoType=2`) or Complete (`DebugInfoType=1`).
 
@@ -152,11 +156,13 @@ _BEDaisy's section layout: a small .text section alongside a 7.4MB .be0 section.
 
 The last page was paged out, so the dump is 4KB short of the full image, but that is padding at the end and does not affect the code.
 
-### The Surprise: Still Obfuscated
+### Still Obfuscated in Memory
 
-Loading this dump into IDA, I expected to see decrypted code in the `.be0` section. Instead, it looked essentially identical to the on-disk binary. The `.be0` section still contained the same opaque data and nullsub functions.
+Loading this dump into IDA, the `.be0` section looked essentially identical to the on-disk binary. The same opaque data and nullsub functions, with no sign of decryption.
 
-This told me something important: **BEDaisy does not use traditional packing**. It does not decrypt the `.be0` section in place. The code in `.be0` runs in its obfuscated form. What I was looking at was not encrypted code waiting to be unpacked, but rather obfuscated code that executes directly with junk instructions, opaque predicates, and control flow flattening as runtime protection.
+This is expected for a virtualized binary. VMProtect does not work like a compression packer that restores native assembly into memory at runtime. Instead, it permanently converts the original x86-64 instructions into custom VM bytecode during the protection process. The original instructions are gone; the bytecode is the code. At runtime, a custom VM interpreter reads and executes the bytecode directly. There is nothing to decrypt because the native code no longer exists anywhere. Calling a VMProtected binary packed is accurate in both the technical and colloquial sense: the original instructions are packed into a virtualized format, and the binary sections are packed together. The memory dump looking identical to disk is exactly what you should expect from a virtualized binary.
+
+The practical consequence is that the `.be0` section cannot be recovered by memory dumping. There is no clean assembly to retrieve because the original assembly was destroyed during protection.
 
 ---
 
@@ -519,7 +525,7 @@ The entry condition filters aggressively. The callback only proceeds if three co
 
 When all three conditions pass, the callback checks whether the thread was created by the game itself or by an external process. It reads the current ETHREAD pointer from the GS segment (`__readgsqword(0x188)`) and passes it to `fn_PsGetThreadProcessId` to get the creating thread's owning process ID. If that PID matches `g_GamePID`, the game created its own thread and there is nothing suspicious. If it does not match, an external process injected a thread into the game, and BEDaisy begins its inspection.
 
-The inspection starts by looking up the thread object via `fn_PsLookupThreadByThreadId`, then opening a handle to it with `fn_ObOpenObjectByPointer` requesting `THREAD_QUERY_INFORMATION` access (0x200). The object type passed to `ObOpenObjectByPointer` is dereferenced from `fn_PsThreadType`, which is the kernel's `PsThreadType` global. With the handle open, BEDaisy calls `fn_ZwQueryInformationThread` with information class 9 (`ThreadQuerySetWin32StartAddress`) to retrieve the thread's start address into `ThreadStartAddress`.
+The inspection starts by looking up the thread object via `fn_PsLookupThreadByThreadId`, then opening a handle to it with `fn_ObOpenObjectByPointer` requesting `THREAD_QUERY_INFORMATION` access (0x0040). The object type passed to `ObOpenObjectByPointer` is dereferenced from `fn_PsThreadType`, which is the kernel's `PsThreadType` global. With the handle open, BEDaisy calls `fn_ZwQueryInformationThread` with information class 9 (`ThreadQuerySetWin32StartAddress`) to retrieve the thread's start address into `ThreadStartAddress`.
 
 ![BEDaisy thread callback - detection and inspection](/assets/img/posts/bedaisy-tcb-detection.png)
 _Thread creation callback entry: filtering for the game process, remote thread detection via PsGetThreadProcessId, thread object lookup, and start address query._
@@ -605,6 +611,12 @@ The obfuscation is real and significant, it will stop casual inspection and make
 What remains unexplored is the bulk of the `.be0` section. The `IRP_MJ_DEVICE_CONTROL` handler (the IOCTL interface between BEService and the driver), the `ObRegisterCallbacks` implementation, the memory scanning logic, and the handle table enumeration code are all present in the dump and theoretically decompilable, but each would require significant time investment to rename variables, resolve function pointers, and reconstruct the program logic. That is work for another time, or another post.
 
 The runtime API table alone tells us that BEDaisy implements every major technique covered in the first post: handle protection, process/thread/image monitoring, cross-process memory access, handle table scanning, APC-based thread injection for stack walking, section mapping for integrity verification, and process suspension for scan safety. BattlEye's kernel driver is not doing anything exotic or unknown. It is executing well-understood anti-cheat techniques behind a layer of obfuscation and debugger detection that makes casual reverse engineering impractical and raises the cost of developing bypasses.
+
+---
+
+## Acknowledgments
+
+After publishing this post, I received feedback that corrected several of my initial conclusions. The section name reasoning against VMProtect was wrong: section names are configurable and prove nothing about which protector was used. The claim that BEDaisy does not use traditional packing was a misunderstanding of how code virtualization works. VMProtect is considered a packer by the reverse engineering community because it packs original instructions into a virtualized format, even though it does not decrypt native assembly at runtime. And the framing of the memory dump as surprising was backwards: for a virtualized binary, the dump looking identical to disk is exactly what you should expect, because the original code was destroyed during protection and replaced with VM bytecode permanently. Getting this feedback helped me understand the protection scheme more accurately than I had on my own. Thanks to @tulachsam for taking the time to go through it, and to @eversinc33 for pointing out drvtrace as an alternative dynamic analysis approach for virtualized drivers.
 
 ---
 
