@@ -152,7 +152,7 @@ I dumped the full image with `.writemem`:
 ```
 
 ![BEDaisy memory dump](/assets/img/posts/bedaisy-memdump.png)
-_BEDaisy's section layout: a small .text section alongside a 7.4MB .be0 section. All functions in .be0 appear as nullsubs or data in static analysis of the on-disk binary._
+_WinDbg .writemem output writing BEDaisy's mapped image from fffff803\`7c150000 to disk._
 
 The last page was paged out, so the dump is 4KB short of the full image, but that is padding at the end and does not affect the code.
 
