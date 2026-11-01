@@ -1,6 +1,6 @@
 ---
 title: "The Windows Endpoint Security Platform From the Outside: What SYSTEM Can Do Without PPL"
-date: 2026-11-02
+date: 2026-11-01
 categories: [Windows Internals, Reverse Engineering]
 tags: [windows-internals, wesp, edr, minifilter, rust, etw, ppl, detection, ida-pro]
 toc: true
